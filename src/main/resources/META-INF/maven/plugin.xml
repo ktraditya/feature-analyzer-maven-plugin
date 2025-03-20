@@ -1,0 +1,15 @@
+<plugin>
+    <groupId>com.example.maven</groupId>
+    <artifactId>feature-analyzer-maven-plugin</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <goalPrefix>feature-analyzer</goalPrefix>
+    <mojos>
+        <mojo>
+            <goal>analyzefeaturefiles</goal>
+            <description>Scans feature files for duplicates and empty table cells</description>
+            <phase>verify</phase>
+            <implementation>com.example.maven.plugin.FeatureAnalyzerMojo</implementation>
+            <language>java</language>
+        </mojo>
+    </mojos>
+</plugin>
