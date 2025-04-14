@@ -2,135 +2,91 @@ package org.example.maven.plugin;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/**
- * Mojo to analyze feature files and detect duplicate features, scenarios, and empty table cells.
- */
-@Mojo(name = "analyzefeaturefiles")
+@Mojo(name = "analyzefeaturefiles", defaultPhase = LifecyclePhase.VERIFY)
 public class FeatureAnalyzerMojo extends AbstractMojo {
 
-    @Parameter(defaultValue = "${project}", readonly = true, required = true)
-    private MavenProject mavenProject;
+    private static final int MAX_SCENARIOS_PER_FILE = 100;
 
-    /**
-     * If true, the build will fail when validation errors are found.
-     */
-    @Parameter(property = "failOnValidationErrors", defaultValue = "true")
-    private boolean failOnValidationErrors;
+    @Parameter(defaultValue = "${project.basedir}", readonly = true)
+    private File baseDir;
 
     @Override
     public void execute() throws MojoExecutionException {
-        getLog().info("🔍 Scanning for feature files...");
+        try {
+            List<Path> featureFiles = findFeatureFiles(baseDir.toPath());
 
-        Path projectDir = Paths.get(mavenProject.getBasedir().getAbsolutePath());
+            boolean validationFailed = false;
 
-        List<Path> featureFiles;
-        try (Stream<Path> paths = Files.walk(projectDir)) {
-            featureFiles = paths
-                    .filter(Files::isRegularFile)
-                    .filter(p -> p.toString().endsWith(".feature")) // Only .feature files
-                    .filter(p -> !p.toString().contains("target") && !p.toString().contains(".git") && !p.toString().contains("node_modules")) // Exclude unnecessary directories
-                    .collect(Collectors.toList());
+            // Check and report scenario counts
+            boolean tooManyScenarios = validateScenarioCounts(featureFiles);
+            if (tooManyScenarios) validationFailed = true;
+
+            // Check for duplicate feature descriptions
+            Map<String, List<String>> duplicateFeatures = findDuplicateFeatures(featureFiles);
+            if (!duplicateFeatures.isEmpty()) {
+                printDuplicates(duplicateFeatures, "Duplicate feature descriptions");
+                validationFailed = true;
+            }
+
+            // Check for duplicate scenario names
+            Map<String, List<String>> duplicateScenarios = findDuplicateScenarios(featureFiles);
+            if (!duplicateScenarios.isEmpty()) {
+                printDuplicates(duplicateScenarios, "Duplicate scenario names");
+                validationFailed = true;
+            }
+
+            if (validationFailed) {
+                throw new MojoExecutionException("Feature file validation failed.");
+            }
+
         } catch (IOException e) {
-            throw new MojoExecutionException("Error scanning feature files", e);
-        }
-
-        if (featureFiles.isEmpty()) {
-            getLog().warn("⚠ No feature files found.");
-            return;
-        }
-
-        getLog().info("✅ Found " + featureFiles.size() + " feature files.");
-        featureFiles.forEach(file -> getLog().info("   ➜ " + file.getFileName()));
-
-        // Analyze feature files
-        Map<String, List<String>> duplicateFeatures = findDuplicateFeatures(featureFiles);
-        Map<String, List<String>> duplicateScenarios = findDuplicateScenarios(featureFiles);
-        List<String> emptyCellIssues = findEmptyCellsInTables(featureFiles);
-
-        boolean hasErrors = false;
-
-        // Print duplicate features
-        if (!duplicateFeatures.isEmpty()) {
-            hasErrors = true;
-            getLog().error("🚨 Duplicate feature descriptions found:");
-            for (Map.Entry<String, List<String>> entry : duplicateFeatures.entrySet()) {
-                String fileList = String.join(", ", new HashSet<>(entry.getValue()).stream()
-                        .map(f -> Paths.get(f).getFileName().toString())  // Print file name only
-                        .collect(Collectors.toList()));
-                getLog().error("   ❌ Feature: \"" + entry.getKey() + "\" found in files: " + fileList);
-            }
-        }
-
-        // Print duplicate scenarios
-        if (!duplicateScenarios.isEmpty()) {
-            hasErrors = true;
-            getLog().error("🚨 Duplicate scenarios found:");
-            for (Map.Entry<String, List<String>> entry : duplicateScenarios.entrySet()) {
-                String fileList = String.join(", ", new HashSet<>(entry.getValue()).stream()
-                        .map(f -> Paths.get(f).getFileName().toString())  // Print file name only
-                        .collect(Collectors.toList()));
-                getLog().error("   ❌ Scenario: \"" + entry.getKey() + "\" found in files: " + fileList);
-            }
-        }
-
-        // Print empty cell issues
-        if (!emptyCellIssues.isEmpty()) {
-            hasErrors = true;
-            getLog().error("⚠️ Empty cell values found in data tables:");
-            emptyCellIssues.forEach(issue -> getLog().error("   ❌ " + issue));
-        }
-
-        if (hasErrors && failOnValidationErrors) {
-            throw new MojoExecutionException("❌ Feature analysis failed due to validation errors.");
-        } else if (!hasErrors) {
-            getLog().info("✅ No validation issues found.");
+            throw new MojoExecutionException("Error reading feature files", e);
         }
     }
 
-    /**
-     * Finds duplicate feature descriptions across feature files.
-     */
-    private Map<String, List<String>> findDuplicateFeatures(List<Path> featureFiles) throws MojoExecutionException {
-        Map<String, List<String>> featureOccurrences = new HashMap<>();
+    private List<Path> findFeatureFiles(Path root) throws IOException {
+        try (Stream<Path> stream = Files.walk(root)) {
+            return stream.filter(p -> p.toString().endsWith(".feature"))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    private Map<String, List<String>> findDuplicateFeatures(List<Path> featureFiles) {
+        Map<String, List<String>> featureMap = new HashMap<>();
 
         for (Path file : featureFiles) {
             try {
-                List<String> lines = Files.readAllLines(file);
-                for (String line : lines) {
-                    line = line.trim();
-                    if (line.startsWith("Feature:")) {
-                        String featureName = line.replaceFirst("Feature:", "").trim();
-                        featureOccurrences
-                                .computeIfAbsent(featureName, k -> new ArrayList<>())
-                                .add(file.toString());
-                    }
+                String name = Files.lines(file)
+                        .filter(l -> l.trim().startsWith("Feature:"))
+                        .map(l -> l.replace("Feature:", "").trim())
+                        .findFirst().orElse(null);
+
+                if (name != null && !name.isEmpty()) {
+                    featureMap.computeIfAbsent(name, k -> new ArrayList<>())
+                            .add(file.getFileName().toString());
                 }
-            } catch (IOException e) {
-                throw new MojoExecutionException("Error reading file: " + file, e);
-            }
+
+            } catch (IOException ignored) {}
         }
 
-        // Return only duplicates
-        return featureOccurrences.entrySet().stream()
-                .filter(entry -> entry.getValue().size() > 1)
+        return featureMap.entrySet().stream()
+                .filter(e -> e.getValue().size() > 1)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
-    /**
-     * Finds duplicate scenario names across feature files.
-     */
-    private Map<String, List<String>> findDuplicateScenarios(List<Path> featureFiles) throws MojoExecutionException {
-        Map<String, List<String>> scenarioOccurrences = new HashMap<>();
+    private Map<String, List<String>> findDuplicateScenarios(List<Path> featureFiles) {
+        Map<String, List<String>> scenarioMap = new HashMap<>();
 
         for (Path file : featureFiles) {
             try {
@@ -138,54 +94,74 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
                 for (String line : lines) {
                     line = line.trim();
                     if (line.startsWith("Scenario:") || line.startsWith("Scenario Outline:")) {
-                        String scenarioName = line.replaceFirst("Scenario( Outline)?:", "").trim();
-                        scenarioOccurrences
-                                .computeIfAbsent(scenarioName, k -> new ArrayList<>())
-                                .add(file.toString());
+                        String name = line.substring(line.indexOf(":") + 1).trim();
+                        if (!name.isEmpty()) {
+                            scenarioMap.computeIfAbsent(name, k -> new ArrayList<>())
+                                    .add(file.getFileName().toString());
+                        }
                     }
                 }
-            } catch (IOException e) {
-                throw new MojoExecutionException("Error reading file: " + file, e);
-            }
+            } catch (IOException ignored) {}
         }
 
-        // Return only duplicates
-        return scenarioOccurrences.entrySet().stream()
-                .filter(entry -> entry.getValue().size() > 1)
+        return scenarioMap.entrySet().stream()
+                .filter(e -> e.getValue().size() > 1)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
-    /**
-     * Finds empty cells in data tables and example tables.
-     */
-    private List<String> findEmptyCellsInTables(List<Path> featureFiles) throws MojoExecutionException {
-        List<String> emptyCellIssues = new ArrayList<>();
+    private int countScenariosInFile(Path featureFile) {
+        int scenarioCount = 0;
+        try {
+            List<String> lines = Files.readAllLines(featureFile);
+            boolean inScenarioOutline = false;
+            boolean inExamples = false;
+
+            for (String line : lines) {
+                line = line.trim();
+
+                if (line.startsWith("Scenario:")) {
+                    scenarioCount++;
+                    inScenarioOutline = false;
+                    inExamples = false;
+                } else if (line.startsWith("Scenario Outline:")) {
+                    inScenarioOutline = true;
+                    inExamples = false;
+                } else if (inScenarioOutline && line.startsWith("Examples:")) {
+                    inExamples = true;
+                } else if (inExamples && line.startsWith("|")) {
+                    if (!line.toLowerCase().contains("name") && !line.toLowerCase().contains("example")) {
+                        scenarioCount++;
+                    }
+                } else if (line.isEmpty()) {
+                    inExamples = false;
+                }
+            }
+        } catch (IOException ignored) {}
+
+        return scenarioCount;
+    }
+
+    private boolean validateScenarioCounts(List<Path> featureFiles) {
+        boolean hasViolations = false;
 
         for (Path file : featureFiles) {
-            try {
-                List<String> lines = Files.readAllLines(file);
-                boolean inTable = false;
-
-                for (int i = 0; i < lines.size(); i++) {
-                    String line = lines.get(i).trim();
-
-                    if (line.startsWith("|")) {  // Inside a table
-                        inTable = true;
-                        String[] cells = line.split("\\|");
-                        for (int j = 1; j < cells.length - 1; j++) { // Skip first and last empty splits
-                            if (cells[j].trim().isEmpty()) {
-                                emptyCellIssues.add("Empty cell found in file: " + file.getFileName() + " at line " + (i + 1));
-                            }
-                        }
-                    } else {
-                        inTable = false;  // Reset when table ends
-                    }
-                }
-            } catch (IOException e) {
-                throw new MojoExecutionException("Error reading file: " + file, e);
+            int count = countScenariosInFile(file);
+            System.out.println("📄 " + file.getFileName() + " (Total Scenarios: " + count + ")");
+            if (count > MAX_SCENARIOS_PER_FILE) {
+                getLog().error("❌ Scenario count exceeded in file: " + file.getFileName() +
+                        " (Count: " + count + ", Max allowed: " + MAX_SCENARIOS_PER_FILE + ")");
+                hasViolations = true;
             }
         }
 
-        return emptyCellIssues;
+        return hasViolations;
+    }
+
+    private void printDuplicates(Map<String, List<String>> map, String title) {
+        getLog().error("🚨 " + title + ":");
+        map.forEach((key, files) -> {
+            List<String> uniqueFiles = new ArrayList<>(new HashSet<>(files));
+            getLog().error("- '" + key + "': " + String.join(", ", uniqueFiles));
+        });
     }
 }
