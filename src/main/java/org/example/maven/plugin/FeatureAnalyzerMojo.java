@@ -25,18 +25,21 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
     public void execute() throws MojoExecutionException {
         try {
             List<Path> featureFiles = findFeatureFiles(baseDir.toPath());
-
             boolean validationFailed = false;
 
-            boolean tooManyScenarios = validateScenarioCounts(featureFiles);
-            if (tooManyScenarios) validationFailed = true;
+            // 1. Scenario Count Validation
+            if (validateScenarioCounts(featureFiles)) {
+                validationFailed = true;
+            }
 
+            // 2. Feature Description Duplication
             Map<String, DuplicateEntry> duplicateFeatures = findDuplicateFeatures(featureFiles);
             if (!duplicateFeatures.isEmpty()) {
                 printDuplicates(duplicateFeatures, "Duplicate feature descriptions");
                 validationFailed = true;
             }
 
+            // 3. Scenario Name Duplication
             Map<String, DuplicateEntry> duplicateScenarios = findDuplicateScenarios(featureFiles);
             if (!duplicateScenarios.isEmpty()) {
                 printDuplicates(duplicateScenarios, "Duplicate scenario names");
@@ -48,7 +51,7 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
             }
 
         } catch (IOException e) {
-            throw new MojoExecutionException("Error reading feature files", e);
+            throw new MojoExecutionException("Error scanning feature files", e);
         }
     }
 
@@ -68,10 +71,11 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
                         .map(String::trim)
                         .filter(l -> l.startsWith("Feature:"))
                         .map(l -> l.substring("Feature:".length()).trim())
+                        .filter(s -> !s.isEmpty())
                         .findFirst();
 
                 if (featureLine.isPresent()) {
-                    String original = featureLine.get().trim();
+                    String original = featureLine.get();
                     String key = original.toLowerCase();
 
                     map.computeIfAbsent(key, k -> new DuplicateEntry(original))
@@ -98,6 +102,7 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
                         String original = line.substring(line.indexOf(":") + 1).trim();
                         if (!original.isEmpty()) {
                             String key = original.toLowerCase();
+
                             map.computeIfAbsent(key, k -> new DuplicateEntry(original))
                                .addFile(file.getFileName().toString());
                         }
@@ -111,13 +116,29 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
+    private boolean validateScenarioCounts(List<Path> featureFiles) {
+        boolean hasViolations = false;
+
+        for (Path file : featureFiles) {
+            int count = countScenariosInFile(file);
+            System.out.println("📄 " + file.getFileName() + " (Total Scenarios: " + count + ")");
+            if (count > MAX_SCENARIOS_PER_FILE) {
+                getLog().error("❌ Scenario count exceeded in file: " + file.getFileName() +
+                        " (Count: " + count + ", Max allowed: " + MAX_SCENARIOS_PER_FILE + ")");
+                hasViolations = true;
+            }
+        }
+
+        return hasViolations;
+    }
+
     private int countScenariosInFile(Path featureFile) {
         int scenarioCount = 0;
+        boolean inScenarioOutline = false;
+        boolean inExamples = false;
+
         try {
             List<String> lines = Files.readAllLines(featureFile);
-            boolean inScenarioOutline = false;
-            boolean inExamples = false;
-
             for (String line : lines) {
                 line = line.trim();
 
@@ -141,22 +162,6 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
         } catch (IOException ignored) {}
 
         return scenarioCount;
-    }
-
-    private boolean validateScenarioCounts(List<Path> featureFiles) {
-        boolean hasViolations = false;
-
-        for (Path file : featureFiles) {
-            int count = countScenariosInFile(file);
-            System.out.println("📄 " + file.getFileName() + " (Total Scenarios: " + count + ")");
-            if (count > MAX_SCENARIOS_PER_FILE) {
-                getLog().error("❌ Scenario count exceeded in file: " + file.getFileName() +
-                        " (Count: " + count + ", Max allowed: " + MAX_SCENARIOS_PER_FILE + ")");
-                hasViolations = true;
-            }
-        }
-
-        return hasViolations;
     }
 
     private void printDuplicates(Map<String, DuplicateEntry> map, String title) {
