@@ -28,19 +28,16 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
 
             boolean validationFailed = false;
 
-            // Check for scenario count limit
             boolean tooManyScenarios = validateScenarioCounts(featureFiles);
             if (tooManyScenarios) validationFailed = true;
 
-            // Check for duplicate feature descriptions
-            Map<String, Set<String>> duplicateFeatures = findDuplicateFeatures(featureFiles);
+            Map<String, List<String>> duplicateFeatures = findDuplicateFeatures(featureFiles);
             if (!duplicateFeatures.isEmpty()) {
                 printDuplicates(duplicateFeatures, "Duplicate feature descriptions");
                 validationFailed = true;
             }
 
-            // Check for duplicate scenario names
-            Map<String, Set<String>> duplicateScenarios = findDuplicateScenarios(featureFiles);
+            Map<String, List<String>> duplicateScenarios = findDuplicateScenarios(featureFiles);
             if (!duplicateScenarios.isEmpty()) {
                 printDuplicates(duplicateScenarios, "Duplicate scenario names");
                 validationFailed = true;
@@ -62,8 +59,9 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
         }
     }
 
-    private Map<String, Set<String>> findDuplicateFeatures(List<Path> featureFiles) {
-        Map<String, Set<String>> featureMap = new HashMap<>();
+    private Map<String, List<String>> findDuplicateFeatures(List<Path> featureFiles) {
+        Map<String, List<String>> featureMap = new HashMap<>();
+        Map<String, Integer> countMap = new HashMap<>();
 
         for (Path file : featureFiles) {
             try {
@@ -75,19 +73,24 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
 
                 if (featureLine.isPresent()) {
                     String name = featureLine.get();
-                    featureMap.computeIfAbsent(name, k -> new HashSet<>()).add(file.getFileName().toString());
+                    featureMap.computeIfAbsent(name, k -> new ArrayList<>()).add(file.getFileName().toString());
+                    countMap.put(name, countMap.getOrDefault(name, 0) + 1);
                 }
 
             } catch (IOException ignored) {}
         }
 
-        return featureMap.entrySet().stream()
-                .filter(e -> e.getValue().size() > 1)
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        return countMap.entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> featureMap.get(e.getKey())
+                ));
     }
 
-    private Map<String, Set<String>> findDuplicateScenarios(List<Path> featureFiles) {
-        Map<String, Set<String>> scenarioMap = new HashMap<>();
+    private Map<String, List<String>> findDuplicateScenarios(List<Path> featureFiles) {
+        Map<String, List<String>> scenarioMap = new HashMap<>();
+        Map<String, Integer> countMap = new HashMap<>();
 
         for (Path file : featureFiles) {
             try {
@@ -97,16 +100,20 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
                     if (line.startsWith("Scenario:") || line.startsWith("Scenario Outline:")) {
                         String name = line.substring(line.indexOf(":") + 1).trim();
                         if (!name.isEmpty()) {
-                            scenarioMap.computeIfAbsent(name, k -> new HashSet<>()).add(file.getFileName().toString());
+                            scenarioMap.computeIfAbsent(name, k -> new ArrayList<>()).add(file.getFileName().toString());
+                            countMap.put(name, countMap.getOrDefault(name, 0) + 1);
                         }
                     }
                 }
             } catch (IOException ignored) {}
         }
 
-        return scenarioMap.entrySet().stream()
-                .filter(e -> e.getValue().size() > 1)
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        return countMap.entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> scenarioMap.get(e.getKey())
+                ));
     }
 
     private int countScenariosInFile(Path featureFile) {
@@ -157,10 +164,11 @@ public class FeatureAnalyzerMojo extends AbstractMojo {
         return hasViolations;
     }
 
-    private void printDuplicates(Map<String, Set<String>> map, String title) {
+    private void printDuplicates(Map<String, List<String>> map, String title) {
         getLog().error("🚨 " + title + ":");
         map.forEach((key, files) -> {
-            getLog().error("- '" + key + "' in: " + String.join(", ", files));
+            Set<String> uniqueFiles = new HashSet<>(files);
+            getLog().error("- '" + key + "' in: " + String.join(", ", uniqueFiles));
         });
     }
 }
