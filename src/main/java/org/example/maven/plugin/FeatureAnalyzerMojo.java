@@ -2,7 +2,6 @@ package org.example.maven.plugin;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -12,200 +11,202 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Mojo(name = "analyzefeaturefiles", defaultPhase = LifecyclePhase.VERIFY)
 public class FeatureAnalyzerMojo extends AbstractMojo {
 
-    // Emoji Constants
-    private static final String FEATURE_EMOJI = "\uD83D\uDCDC "; // 📜
-    private static final String SCENARIO_EMOJI = "\uD83D\uDCDD "; // 📝
-    private static final String ERROR_EMOJI = "\uD83D\uDEAB "; // 🚫
-    private static final String FILES_EMOJI = "\uD83D\uDCC2 "; // 📂
-    private static final String DUPLICATE_EMOJI = "\uD83D\uDD01 "; // 🔁
-    private static final String SUCCESS_EMOJI = "\uD83C\uDF89 "; // 🎉
-    private static final String CHECK_EMOJI = "\u2705 "; // ✅
-    private static final String WARNING_EMOJI = "\u26A0\uFE0F "; // ⚠️
-
-    @Parameter(defaultValue = "${project}", readonly = true, required = true)
+    // Configuration parameters
+    @Parameter(defaultValue = "${project}", readonly = true)
     private MavenProject project;
 
-    @Parameter(defaultValue = "src/test/resources", property = "featuresDirectory")
+    @Parameter(defaultValue = "src/test/resources")
     private String featuresDirectory;
 
-    @Parameter(defaultValue = "100", property = "maxScenariosPerFeature")
+    @Parameter(defaultValue = "100")
     private int maxScenariosPerFeature;
 
+    // Emoji constants
+    private static final String ERROR_EMOJI = "🚫 ";
+    private static final String DUPLICATE_EMOJI = "🔁 ";
+    private static final String FEATURE_EMOJI = "📜 ";
+    private static final String SCENARIO_EMOJI = "📝 ";
+
     @Override
-    public void execute() throws MojoExecutionException, MojoFailureException {
-        printBanner("STARTING FEATURE ANALYSIS", "\uD83D\uDD0E "); // 🔎
-
+    public void execute() throws MojoExecutionException {
         try {
-            List<Path> featureFiles = findFeatureFiles();
-            if (featureFiles.isEmpty()) {
-                getLog().warn(WARNING_EMOJI + "No feature files found in " + featuresDirectory);
-                return;
+            ValidationResult result = new FeatureValidator()
+                    .validateFeatures(featuresDirectory, maxScenariosPerFeature);
+
+            if (result.hasErrors()) {
+                result.getErrors().forEach(getLog()::error);
+                throw new MojoExecutionException(ERROR_EMOJI + "Feature validation failed");
             }
-
-            Map<String, List<String>> featureDescriptions = new HashMap<>();
-            Map<String, List<String>> scenarioNames = new HashMap<>();
-            boolean validationPassed = true;
-
-            for (Path featureFile : featureFiles) {
-                FeatureFileStats stats = analyzeFeatureFile(featureFile, featureDescriptions, scenarioNames);
-                logFeatureStats(featureFile, stats);
-
-                if (stats.scenarioCount > maxScenariosPerFeature) {
-                    validationPassed = false;
-                    getLog().error(ERROR_EMOJI + String.format(
-                            "Scenario limit exceeded! %d > %d (max)",
-                            stats.scenarioCount, maxScenariosPerFeature));
-                }
-            }
-
-            if (!checkForDuplicates(featureDescriptions, scenarioNames)) {
-                validationPassed = false;
-            }
-
-            if (validationPassed) {
-                printSuccessBanner();
-            } else {
-                throw new MojoExecutionException("Feature validation failed");
-            }
-
         } catch (IOException e) {
-            getLog().error(ERROR_EMOJI + "File reading error: " + e.getMessage());
-            throw new MojoExecutionException("Error reading feature files", e);
+            throw new MojoExecutionException(ERROR_EMOJI + "File error: " + e.getMessage(), e);
         }
     }
 
+    // Core validation logic extracted to separate class
+    private class FeatureValidator {
+        ValidationResult validateFeatures(String featuresDir, int maxScenarios) throws IOException {
+            ValidationResult result = new ValidationResult();
+            List<Path> featureFiles = findFeatureFiles(featuresDir);
+
+            if (featureFiles.isEmpty()) {
+                getLog().warn("No feature files found");
+                return result;
+            }
+
+            featureFiles.forEach(file -> processFeatureFile(file, maxScenarios, result));
+            return result;
+        }
+
+        private List<Path> findFeatureFiles(String featuresDir) throws IOException {
+            Path startPath = Paths.get(project.getBasedir().getAbsolutePath(), featuresDir);
+            if (!Files.exists(startPath)) return Collections.emptyList();
+
+            try (Stream<Path> paths = Files.walk(startPath)) {
+                return paths.filter(Files::isRegularFile)
+                        .filter(path -> path.toString().endsWith(".feature"))
+                        .collect(Collectors.toList());
+            }
+        }
+
+        private void processFeatureFile(Path file, int maxScenarios, ValidationResult result) {
+            try {
+                FeatureFileStats stats = new FeatureFileParser().parse(file);
+                validateFeature(file, stats, maxScenarios, result);
+            } catch (IOException e) {
+                result.addError("Failed to parse: " + file, e);
+            }
+        }
+
+        private void validateFeature(Path file, FeatureFileStats stats, int maxScenarios, ValidationResult result) {
+            result.trackFeature(stats.featureDescription, file);
+            stats.scenarioNames.forEach(name -> result.trackScenario(name, file));
+
+            if (stats.scenarioCount > maxScenarios) {
+                result.addError(ERROR_EMOJI + String.format(
+                        "Scenario limit exceeded in %s (%d > %d)",
+                        file.getFileName(), stats.scenarioCount, maxScenarios));
+            }
+        }
+    }
+
+    // Statistics tracking
     private static class FeatureFileStats {
         int scenarioCount;
-        List<String> scenarioNames = new ArrayList<>();
+        String featureDescription;
+        final List<String> scenarioNames = new ArrayList<>();
     }
 
-    private FeatureFileStats analyzeFeatureFile(Path featureFile,
-                                                Map<String, List<String>> featureDescriptions,
-                                                Map<String, List<String>> scenarioNames)
-            throws IOException {
-        FeatureFileStats stats = new FeatureFileStats();
-        List<String> lines = Files.readAllLines(featureFile);
-        boolean inExamples = false;
-        int examplesStartLine = -1;
-        String currentFeature = null;
+    // File parsing logic
+    private static class FeatureFileParser {
+        FeatureFileStats parse(Path file) throws IOException {
+            FeatureFileStats stats = new FeatureFileStats();
+            ParseState state = new ParseState();
 
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i).trim();
+            Files.lines(file)
+                    .map(String::trim)
+                    .filter(line -> !line.isEmpty())
+                    .forEach(line -> processLine(line, stats, state));
+
+            return stats;
+        }
+
+        private void processLine(String line, FeatureFileStats stats, ParseState state) {
+            if (line.startsWith("#") || line.startsWith("@")) return;
 
             if (line.startsWith("Feature:")) {
-                currentFeature = line.substring("Feature:".length()).trim();
-                trackDescription(featureDescriptions, currentFeature, featureFile.getFileName().toString());
+                stats.featureDescription = line.substring("Feature:".length()).trim();
             }
-            else if (line.startsWith("Scenario:") && currentFeature != null) {
-                stats.scenarioCount++;
-                String scenarioName = line.substring("Scenario:".length()).trim();
-                trackScenario(scenarioNames, scenarioName, featureFile.getFileName().toString());
-                stats.scenarioNames.add(scenarioName);
-                inExamples = false;
+            else if (line.startsWith("Scenario")) {
+                handleScenario(line, stats, state);
             }
-            else if (line.startsWith("Scenario Outline:") && currentFeature != null) {
-                String scenarioName = line.substring("Scenario Outline:".length()).trim();
-                trackScenario(scenarioNames, scenarioName, featureFile.getFileName().toString());
-                stats.scenarioNames.add(scenarioName);
-                inExamples = false;
-                examplesStartLine = -1;
+            else if (state.inExamples && line.startsWith("|") && line.endsWith("|")) {
+                handleExampleLine(state, stats);
             }
-            else if (line.startsWith("Examples:") && currentFeature != null) {
-                inExamples = true;
-                examplesStartLine = i;
-            }
-            else if (inExamples && line.startsWith("|") && line.endsWith("|")) {
-                if (i == examplesStartLine + 1) continue; // Skip header
-                stats.scenarioCount++;
-            }
-            else if (!line.isEmpty() && !line.startsWith("#") && !line.startsWith("@")) {
-                inExamples = false;
+            else {
+                state.inExamples = line.startsWith("Examples:");
             }
         }
 
-        return stats;
-    }
+        private void handleScenario(String line, FeatureFileStats stats, ParseState state) {
+            String prefix = line.contains("Outline") ? "Scenario Outline:" : "Scenario:";
+            stats.scenarioNames.add(line.substring(prefix.length()).trim());
+            stats.scenarioCount++;
+            state.reset();
+        }
 
-    private void logFeatureStats(Path featureFile, FeatureFileStats stats) {
-        getLog().info(CHECK_EMOJI + String.format("%s - %d scenarios",
-                featureFile.getFileName(), stats.scenarioCount));
-
-        if (stats.scenarioCount > maxScenariosPerFeature * 0.8) {
-            getLog().warn(WARNING_EMOJI + String.format(
-                    "Warning: Feature file is approaching limit (%d/%d scenarios)",
-                    stats.scenarioCount, maxScenariosPerFeature));
+        private void handleExampleLine(ParseState state, FeatureFileStats stats) {
+            if (!state.examplesHeader) stats.scenarioCount++;
+            state.examplesHeader = false;
         }
     }
 
-    private List<Path> findFeatureFiles() throws IOException {
-        Path startPath = Paths.get(project.getBasedir().getAbsolutePath(), featuresDirectory);
-        if (!Files.exists(startPath)) {
-            return new ArrayList<>();
-        }
-        try (Stream<Path> paths = Files.walk(startPath)) {
-            return paths.filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".feature"))
-                    .collect(Collectors.toList());
+    // Parse state tracker
+    private static class ParseState {
+        boolean inExamples = false;
+        boolean examplesHeader = true;
+
+        void reset() {
+            inExamples = false;
+            examplesHeader = true;
         }
     }
 
-    private boolean checkForDuplicates(Map<String, List<String>> featureDescriptions,
-                                       Map<String, List<String>> scenarioNames) {
-        boolean hasErrors = false;
+    // Result container
+    private static class ValidationResult {
+        private final Map<String, List<String>> features = new HashMap<>();
+        private final Map<String, List<String>> scenarios = new HashMap<>();
+        private final List<String> errors = new ArrayList<>();
 
-        // Check feature duplicates
-        for (Map.Entry<String, List<String>> entry : featureDescriptions.entrySet()) {
-            if (entry.getValue().size() > 1) {
-                hasErrors = true;
-                getLog().error(ERROR_EMOJI + DUPLICATE_EMOJI + FEATURE_EMOJI +
-                        String.format("'%s' in files: %s",
-                                entry.getKey(), FILES_EMOJI + String.join(", ", entry.getValue())));
+        void trackFeature(String description, Path file) {
+            if (description != null) {
+                features.computeIfAbsent(description, k -> new ArrayList<>())
+                        .add(file.getFileName().toString());
             }
         }
 
-        // Check scenario duplicates
-        for (Map.Entry<String, List<String>> entry : scenarioNames.entrySet()) {
-            if (entry.getValue().size() > 1) {
-                hasErrors = true;
-                getLog().error(ERROR_EMOJI + DUPLICATE_EMOJI + SCENARIO_EMOJI +
-                        String.format("'%s' in files: %s",
-                                entry.getKey(), FILES_EMOJI + String.join(", ", entry.getValue())));
-            }
+        void trackScenario(String name, Path file) {
+            scenarios.computeIfAbsent(name, k -> new ArrayList<>())
+                    .add(file.getFileName().toString());
         }
 
-        return !hasErrors;
-    }
+        void addError(String message) {
+            errors.add(message);
+        }
 
-    private void trackDescription(Map<String, List<String>> map, String description, String fileName) {
-        map.computeIfAbsent(description, k -> new ArrayList<>()).add(fileName);
-    }
+        void addError(String message, Exception e) {
+            errors.add(message + ": " + e.getMessage());
+        }
 
-    private void trackScenario(Map<String, List<String>> map, String scenarioName, String fileName) {
-        map.computeIfAbsent(scenarioName, k -> new ArrayList<>()).add(fileName);
-    }
+        boolean hasErrors() {
+            checkDuplicates();
+            return !errors.isEmpty();
+        }
 
-    private void printBanner(String title, String emoji) {
-        String border = "═".repeat(title.length() + 4);
-        getLog().info("\n╔" + border + "╗\n║ " + emoji + title + " ║\n╚" + border + "╝");
-    }
+        List<String> getErrors() {
+            return errors;
+        }
 
-    private void printSuccessBanner() {
-        getLog().info("\n" +
-                "╔══════════════════════════════════════╗\n" +
-                "║          " + SUCCESS_EMOJI + " VALIDATION PASSED " + SUCCESS_EMOJI + "         ║\n" +
-                "╠══════════════════════════════════════╣\n" +
-                "║ All feature files validated          ║\n" +
-                "║ " + CHECK_EMOJI + " No duplicates found              ║\n" +
-                "╚══════════════════════════════════════╝");
+        private void checkDuplicates() {
+            features.forEach((desc, files) -> {
+                if (files.size() > 1) {
+                    errors.add(ERROR_EMOJI + DUPLICATE_EMOJI + FEATURE_EMOJI +
+                            String.format("'%s' (duplicated %d times)", desc, files.size()));
+                }
+            });
+
+            scenarios.forEach((name, files) -> {
+                if (files.size() > 1) {
+                    errors.add(ERROR_EMOJI + DUPLICATE_EMOJI + SCENARIO_EMOJI +
+                            String.format("'%s' (duplicated %d times)", name, files.size()));
+                }
+            });
+        }
     }
 }
